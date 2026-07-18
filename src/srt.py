@@ -43,9 +43,17 @@ def _fmt_ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
+MAX_LINES = 2   # at most 2 visible lines inside one subtitle entry
+
+
 def group_units_to_subtitles(units, max_chars: int, max_duration: float,
                               merge_blanks: bool = True) -> List[Subtitle]:
     """``units`` = iterable of objects with .text/.start_time/.end_time."""
+    # Gap (seconds) between adjacent items that counts as a "pause" worthy
+    # of breaking into a new subtitle line.  Shorter gaps are continuous
+    # speech and should stay together in one entry.
+    GAP_THRESHOLD = 1.0
+    MIN_DURATION = 1.5   # minimum seconds a subtitle stays on screen
     items = []
     for u in units:
         items.append((str(getattr(u, "text", "")), float(getattr(u, "start_time", 0.0)),
@@ -95,24 +103,48 @@ def group_units_to_subtitles(units, max_chars: int, max_duration: float,
         cur_text, cur_start = "", None
         cur_end = 0.0
 
+    prev_et: float | None = None
+    cur_lines: int = 0
     for text, st, et in items:
         if not text or not text.strip():
             continue
+        # A meaningful pause between words → flush the current line and
+        # start a fresh one.  Short gaps (sub-second) are natural speech
+        # rhythm and should not be broken.
+        if cur_text and prev_et is not None and (st - prev_et) > GAP_THRESHOLD:
+            flush()
+            cur_start = st
         if cur_start is None:
             cur_start = st
-        candidate = _join_keep_space(cur_text, text) if cur_text else text
+        # line break within same subtitle entry (not a new entry)
+        if cur_text and _count_chars_for_break(cur_text + text) > max_chars and cur_lines < MAX_LINES:
+            cur_text = cur_text.rstrip() + "\n"
+            cur_lines += 1
+            candidate = cur_text + text
+        else:
+            candidate = _join_keep_space(cur_text, text) if cur_text else text
         over_chars = _count_chars_for_break(candidate) > max_chars
         over_dur = (et - cur_start) > max_duration
         if (over_chars or over_dur) and cur_text:
-            flush()
-            cur_start = st
-            candidate = text
+            # only flush to a brand-new entry on over_dur or gap; over_chars
+            # is now handled by the inline line-break above.
+            if over_dur:
+                flush()
+                cur_start = st
+                candidate = _join_keep_space("", text)
+                cur_lines = 0
         cur_text = candidate.strip()
         cur_end = et
+        prev_et = et
     flush()
 
     for i, sb in enumerate(subs, 1):
         sb.index = i
+        # ensure minimum on-screen duration so short entries don't flash by
+        if sb.end - sb.start < MIN_DURATION:
+            sb.end = round(sb.start + MIN_DURATION, 3)
+        # normalize double newlines that may have crept in
+        sb.text = sb.text.replace("\n\n", "\n")
     return subs
 
 
