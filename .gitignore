@@ -1,0 +1,15 @@
+venv/
+models/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+output/
+downloads/
+config.json
+/tmp/
+*.log
+*.m4a
+*.wav
+*.safetensors
+*.bin

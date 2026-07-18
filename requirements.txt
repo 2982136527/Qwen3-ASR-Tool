@@ -1,0 +1,16 @@
+# Qwen3-ASR GUI Tool - Python 3.12
+# Install with:  pip install -r requirements.txt
+torch>=2.6
+torchaudio>=2.6
+qwen-asr==0.0.6
+transformers>=4.57,<5
+accelerate>=1.0
+huggingface_hub>=0.25
+modelscope>=1.20
+soundfile>=0.12
+librosa>=0.10
+numpy>=1.26,<3
+pyaudio>=0.2.14
+srt>=3.5
+PyQt6>=6.7
+PyQt6-WebEngine>=6.7
