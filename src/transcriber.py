@@ -35,7 +35,7 @@ class _ShiftedItem:
 
 
 def _trim_silence(wav: np.ndarray, min_keep_sec: float = 5.0,
-                  edge_energy: float = 0.012, win_sec: float = 0.03):
+                  edge_energy: float = 0.005, win_sec: float = 0.03):
     """Drop leading/trailing low-energy frames. Returns (trimmed, head_sec)
     where head_sec is how far into the input the trimmed window starts, so
     downstream timestamps can be offset by (segment_offset + head_sec)."""
@@ -184,10 +184,10 @@ class BatchWorker(QThread):
                 continue
             # Trim head/tail silence on each chunk before transcription so the
             # model sees a tighter speech window; keep at least 5s for stability.
-            use_wav, head_off = _trim_silence(seg_wav, min_keep_sec=5.0)
+            use_wav, head_off = _trim_silence(seg_wav, min_keep_sec=8.0)
             seg_orig_off = off + head_off
-            if use_wav.shape[0] < 16000 * 1.0:
-                continue
+            # Don't skip even very short trimmed segments;
+            # the model needs every chance to detect speech.
             result = self.model_manager.transcribe_one(use_wav, lang, return_time_stamps=use_ts)
             text = (result.text or "").strip()
             rl = result.language or ""
