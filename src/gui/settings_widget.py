@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (QComboBox, QFormLayout, QGroupBox, QHBoxLayout,
                              QSpinBox, QVBoxLayout, QWidget)
 
 from ..config import (DOWNLOAD_SOURCES, Settings, save_settings, MODEL_OPTIONS, model_by_key)
+from ..model_manager import ModelManager, available_devices, resolve_device
 
 
 class DownloadWorker(QThread):
