@@ -196,19 +196,26 @@ class SettingsWidget(QWidget):
 
     def refresh_status(self):
         try:
-            asr_name = self.settings.model_info()["repo_name"]
-            al = self.settings.model_info().get("aligner", "Qwen3-ForcedAligner-0.6B")
-            asr_st = self.model_manager.model_status(asr_name) if asr_name else "missing"
-            al_st = self.model_manager.model_status(al)
-            d = self.model_manager.model_dir(asr_name)
-            ad = self.model_manager.model_dir(al)
-            size = self._dir_size(d) + self._dir_size(ad)
+            mi = self.settings.model_info()
+            asr_name = mi["repo_name"]
+            al = mi.get("aligner", "")
+            is_auto_dl = not mi.get("needs_download", True)
+            asr_st = "auto" if is_auto_dl else self.model_manager.model_status(asr_name)
+            al_st = "auto" if (not mi.get("aligner_repo") or is_auto_dl) else self.model_manager.model_status(al)
+            size = 0.0
+            if not is_auto_dl:
+                d = self.model_manager.model_dir(asr_name)
+                ad = self.model_manager.model_dir(al) if al else Path(".")
+                size = self._dir_size(d) + self._dir_size(ad)
             color = {"ready": "#9ece6a", "partial": "#e0af68", "missing": "#f7768e"}.get
             html = (
-                f"ASR <b>{asr_name}</b>: <span style='color:{color(asr_st, "#a9b1d6")}'>{asr_st}</span>"
-                f"  ({asr_st})  &nbsp;  "
-                f"对齐器 <b>{al}</b>: <span style='color:{color(al_st, "#a9b1d6")}'>{al_st}</span><br>"
-                f"本地占用: {size/1e9:.2f} GB  &nbsp; 目录: ./models"
+                f"ASR <b>{mi['label']}</b>: <span style='color:{color(asr_st, '#a9b1d6')}'>{asr_st}</span> "
+            )
+            if al:
+                html += f"  |  对齐: <b>{al}</b> <span style='color:{color(al_st, '#a9b1d6')}'>{al_st}</span>"
+            html += (
+                f"<br>本地占用: {size/1e9:.2f} GB  &nbsp; 目录: ./models"
+                if size > 0 else "<br>(模型首次加载时自动下载)"
             )
             self.lbl_status.setText(html)
             if self.model_manager.is_loaded:
