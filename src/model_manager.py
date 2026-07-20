@@ -13,6 +13,7 @@ from typing import Optional
 import numpy as np
 
 from .backends import ASRResult, QwenBackend, WhisperBackend, SenseVoiceBackend
+from .backends.pipeline_backend import PipelineBackend
 from .config import Settings
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -133,6 +134,9 @@ class ModelManager:
             elif backend_type == "sensevoice":
                 self._backend = SenseVoiceBackend(str(self.models_root()))
                 self._load_sensevoice(mi, on_log)
+            elif backend_type == "pipeline":
+                self._backend = PipelineBackend(str(self.models_root()))
+                self._load_pipeline(mi, on_log, on_stage)
             else:
                 raise ValueError(f"Unknown backend: {backend_type}")
 
@@ -190,6 +194,9 @@ class ModelManager:
 
     def unload(self):
         with self._lock:
+            if self._backend is not None:
+                self._backend.unload()
+                self._backend = None
             self._unload_locked()
 
     def transcribe_one(self, wav: np.ndarray, language: Optional[str],
@@ -209,3 +216,26 @@ def _looks_complete(model_dir: Path) -> bool:
     has_weights = any(model_dir.glob("*.safetensors")) or any(model_dir.glob("*.bin"))
     has_tok = (model_dir / "tokenizer.json").exists() or (model_dir / "tokenizer_config.json").exists()
     return has_weights and has_tok
+    def _load_pipeline(self, mi, on_log, on_stage):
+        device = resolve_device(self.settings.device)
+        dtype = resolve_dtype(self.settings.precision, device)
+        # Ensure aligner is downloaded
+        aligner_path = None
+        if mi.get("aligner_repo"):
+            if on_stage:
+                on_stage(f"checking {mi['aligner']}")
+            self.ensure_downloaded(mi["aligner_repo"], mi["aligner"], on_log)
+            aligner_path = str(self.model_dir(mi["aligner"]))
+        if on_log:
+            on_log("info", f"loading pipeline: Whisper+QwenAligner+SenseVoice on {device}")
+        if on_stage:
+            on_stage("loading Whisper...")
+        self._backend.load(
+            whisper_size=mi.get("repo_name", "large-v3"),
+            sensevoice_variant="small",
+            aligner_path=aligner_path,
+            device=device,
+            dtype=dtype,
+        )
+        if on_log:
+            on_log("info", f"pipeline ready")

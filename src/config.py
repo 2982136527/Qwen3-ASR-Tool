@@ -31,6 +31,16 @@ MODEL_OPTIONS = [
         "needs_download": True,
     },
     {
+        "key": "pipeline",
+        "label": "联合管道 (Whisper识别+Qwen对齐+SenseVoice情绪)",
+        "backend": "pipeline",
+        "repo_name": "large-v3",
+        "aligner": "Qwen3-ForcedAligner-0.6B",
+        "aligner_repo": "Qwen/Qwen3-ForcedAligner-0.6B",
+        "needs_download": True,
+        "pipeline": True,
+    },
+    {
         "key": "whisper-large-v3",
         "label": "Whisper large-v3 (faster-whisper)",
         "backend": "whisper",

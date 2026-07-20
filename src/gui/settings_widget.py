@@ -166,13 +166,17 @@ class SettingsWidget(QWidget):
 
     def _on_model_changed(self, idx):
         mi = MODEL_OPTIONS[idx]
-        is_qwen = mi["backend"] == "qwen"
-        self.btn_download.setVisible(is_qwen)
-        self.btn_download_aligner.setVisible(is_qwen)
-        self.btn_download_all.setVisible(is_qwen)
-        self.cmb_prec.setVisible(is_qwen)
-        self.cmb_device.setVisible(is_qwen)
-        if not is_qwen:
+        is_qwen_or_pipe = mi["backend"] in ("qwen", "pipeline")
+        is_builtin = mi["backend"] in ("whisper", "sensevoice")
+        self.btn_download.setVisible(is_qwen_or_pipe)
+        self.btn_download_aligner.setVisible(is_qwen_or_pipe and mi.get("aligner_repo"))
+        self.btn_download_all.setVisible(is_qwen_or_pipe)
+        self.cmb_prec.setVisible(is_qwen_or_pipe)
+        self.cmb_device.setVisible(is_qwen_or_pipe)
+        if is_builtin:
+            self.cmb_align.setChecked(True)
+            self.cmb_align.setEnabled(False)
+        elif mi["backend"] == "pipeline":
             self.cmb_align.setChecked(True)
             self.cmb_align.setEnabled(False)
         else:

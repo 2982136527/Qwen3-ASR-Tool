@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (QMainWindow, QMessageBox, QSplitter,
                               QLabel, QMainWindow, QMessageBox, QSplitter,
                               QStatusBar, QTabWidget, QVBoxLayout, QWidget)
 
-from ..config import (ASR_MODELS, Settings, load_settings, save_settings)
+from ..config import (Settings, load_settings, save_settings)
 from ..model_manager import ModelManager
 from .batch_widget import BatchWidget
 from .log_panel import LogPanel
@@ -114,11 +114,14 @@ class MainWindow(QMainWindow):
             s = f"{self.model_manager.loaded_repo} @ {self.model_manager.device}"
         else:
             # report what's on disk so the user knows next load will be cheap
-            from ..config import ASR_MODELS, ALIGNER_MODEL
-            nm = ASR_MODELS.get(self.settings.asr_model, "")
-            asr_st = self.model_manager.model_status(nm) if nm else "missing"
-            al_st = self.model_manager.model_status(ALIGNER_MODEL)
-            s = f"{nm}: {asr_st}  |  {ALIGNER_MODEL}: {al_st}"
+            mi = self.settings.model_info()
+            nm = mi.get("label", "")
+            al = mi.get("aligner", "")
+            asr_st = "auto" if not mi.get("needs_download") else self.model_manager.model_status(mi["repo_name"])
+            al_st = "auto" if not mi.get("aligner_repo") else self.model_manager.model_status(al)
+            s = f"{nm}: {asr_st}"
+            if al:
+                s += f"  |  对齐: {al} ({al_st})"
         self.lbl_status.setText(f"模型状态: {s}")
 
     def closeEvent(self, e):
