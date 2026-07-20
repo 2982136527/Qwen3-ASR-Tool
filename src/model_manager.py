@@ -1,25 +1,19 @@
-"""Load and manage Qwen3-ASR + Qwen3-ForcedAligner models.
+"""Load and manage ASR models via pluggable backends.
 
-Design goals:
-  * local-first: weights live under ``models/`` in the project dir, downloaded
-    via ModelScope (recommended in Mainland China) with HF fallback, never a
-    remote cloud API.
-  * Applefriendly defaults: device auto -> mps on Apple Silicon, dtype auto ->
-    float16 on mps (MPS has partial bfloat16). CUDA still prefers bfloat16.
-  * single-thread ownership: weights are large and the ASR engine is not
-    thread-safe, so ModelManager serializes load/unload and inference through
-    one owner. The GUI calls it from worker threads.
+Switches between Qwen3-ASR, Whisper large-v3 (faster-whisper), and SenseVoice
+at runtime.  Each backend conforms to the ASRBackend protocol so the rest of
+the application never needs to know which engine is loaded.
 """
 from __future__ import annotations
 
-import shutil
 import threading
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
-from .config import ALIGNER_MODEL, ASR_MODELS, Settings
+from .backends import ASRResult, QwenBackend, WhisperBackend, SenseVoiceBackend
+from .config import Settings
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -36,7 +30,6 @@ def available_devices() -> list:
         devs.append("mps")
     if getattr(torch.cuda, "is_available", lambda: False)():
         devs.append("cuda")
-        # include enumerated cuda:0/1 for transparency
         for i in range(torch.cuda.device_count()):
             devs.append(f"cuda:{i}")
     return devs
@@ -53,7 +46,7 @@ def resolve_device(settings_device: str) -> str:
     return settings_device
 
 
-def resolve_dtype(settings_precision: str, device: str) -> "object":
+def resolve_dtype(settings_precision: str, device: str):
     torch = _import_torch()
     if settings_precision == "auto":
         if device.startswith("cuda"):
@@ -69,21 +62,30 @@ def resolve_dtype(settings_precision: str, device: str) -> "object":
 
 
 class ModelManager:
-    """Owns the loaded ASR model (+ optional aligner). Thread-safe enough for
-    GUI worker threads; not for high concurrency."""
+    """Holds one ASR backend at a time, routes transcribe calls through it."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
         self._lock = threading.Lock()
-        self.asr = None
-        self.aligner_loaded = False
-        self.device = None
-        self.dtype = None
-        self.loaded_repo = None
+        self._backend = None
 
     @property
     def is_loaded(self) -> bool:
-        return self.asr is not None
+        return self._backend is not None and self._backend.is_loaded
+
+    @property
+    def aligner_loaded(self) -> bool:
+        if self._backend is not None:
+            return getattr(self._backend, "aligner_loaded", False)
+        return False
+
+    @property
+    def device(self) -> str:
+        return self._backend.device_name if self._backend else ""
+
+    @property
+    def loaded_repo(self) -> str:
+        return self._backend.model_id if self._backend else ""
 
     def models_root(self) -> Path:
         p = Path(self.settings.models_dir)
@@ -92,11 +94,11 @@ class ModelManager:
         p.mkdir(parents=True, exist_ok=True)
         return p
 
-    def model_dir(self, repo_name: str) -> Path:
-        return self.models_root() / repo_name
+    def model_dir(self, name: str = "") -> Path:
+        return self.models_root() / name
 
-    def model_status(self, repo_name: str) -> str:
-        d = self.model_dir(repo_name)
+    def model_status(self, name: str = "") -> str:
+        d = self.model_dir(name)
         if (d / ".downloaded").exists() and _looks_complete(d):
             return "ready"
         if any(d.glob("*.safetensors")) or any(d.glob("*.json")):
@@ -104,7 +106,6 @@ class ModelManager:
         return "missing"
 
     def ensure_downloaded(self, repo_id: str, repo_name: str, on_log=None) -> Path:
-        """Download a single model if missing. Reuses scripts/fetch logic."""
         target = self.model_dir(repo_name)
         target.mkdir(parents=True, exist_ok=True)
         if (target / ".downloaded").exists() and _looks_complete(target):
@@ -117,101 +118,94 @@ class ModelManager:
         return target
 
     def load(self, on_log=None, on_stage=None) -> None:
-        """Ensure model + aligner are downloaded, then load them onto device.
-
-        Safe to call again after settings change: it unloads first."""
-        torch = _import_torch()
-        from qwen_asr import Qwen3ASRModel
+        mi = self.settings.model_info()
+        backend_type = mi["backend"]
 
         with self._lock:
-            if self.is_loaded:
-                self._unload_locked()
+            self._unload_locked()
 
-            repo_name = self.settings.model_repo()
-            repo_id = f"Qwen/{repo_name}"
-            device = resolve_device(self.settings.device)
-            dtype = resolve_dtype(self.settings.precision, device)
+            if backend_type == "qwen":
+                self._backend = QwenBackend(str(self.models_root()))
+                self._load_qwen(mi, on_log, on_stage)
+            elif backend_type == "whisper":
+                self._backend = WhisperBackend(str(self.models_root()))
+                self._load_whisper(mi, on_log)
+            elif backend_type == "sensevoice":
+                self._backend = SenseVoiceBackend(str(self.models_root()))
+                self._load_sensevoice(mi, on_log)
+            else:
+                raise ValueError(f"Unknown backend: {backend_type}")
 
+    def _load_qwen(self, mi, on_log, on_stage):
+        device = resolve_device(self.settings.device)
+        dtype = resolve_dtype(self.settings.precision, device)
+
+        repo_id = f"Qwen/{mi['repo_name']}"
+        if on_stage:
+            on_stage(f"checking {mi['repo_name']}")
+        self.ensure_downloaded(repo_id, mi["repo_name"], on_log)
+        asr_path = self.model_dir(mi["repo_name"])
+
+        aligner_path = None
+        if self.settings.enable_aligner and mi.get("aligner_repo"):
             if on_stage:
-                on_stage(f"checking {repo_name}")
-            self.ensure_downloaded(repo_id, repo_name, on_log)
-            asr_path = self.model_dir(repo_name)
-            if on_log:
-                on_log("info", f"loading ASR {repo_name} on {device} ({dtype})")
+                on_stage(f"checking {mi['aligner']}")
+            self.ensure_downloaded(mi["aligner_repo"], mi["aligner"], on_log)
+            aligner_path = self.model_dir(mi["aligner"])
 
-            aligner_path = None
-            if self.settings.enable_aligner:
-                if on_stage:
-                    on_stage(f"checking {ALIGNER_MODEL}")
-                self.ensure_downloaded(f"Qwen/{ALIGNER_MODEL}", ALIGNER_MODEL, on_log)
-                aligner_path = self.model_dir(ALIGNER_MODEL)
+        if on_log:
+            on_log("info", f"loading {mi['label']} on {device} ({dtype})")
+        if on_stage:
+            on_stage("loading model")
+        self._backend.load(
+            asr_path=str(asr_path),
+            aligner_path=str(aligner_path) if aligner_path else None,
+            device=device,
+            dtype=dtype,
+            max_inference_batch_size=self.settings.max_inference_batch_size,
+            max_new_tokens=self.settings.max_new_tokens,
+        )
+        if on_log:
+            on_log("info", f"ready: {mi['label']} on {device}")
 
-            if on_stage:
-                on_stage("loading model")
-            kwargs = dict(
-                device_map=device,
-                dtype=dtype,
-                max_inference_batch_size=self.settings.max_inference_batch_size,
-                max_new_tokens=self.settings.max_new_tokens,
-            )
-            if aligner_path is not None:
-                kwargs["forced_aligner"] = str(aligner_path)
-                kwargs["forced_aligner_kwargs"] = dict(device_map=device, dtype=dtype)
+    def _load_whisper(self, mi, on_log):
+        device = resolve_device(self.settings.device)
+        if on_log:
+            on_log("info", f"loading {mi['label']} on {device} ...")
+        self._backend.load(model_size=mi["repo_name"], device=device)
+        if on_log:
+            on_log("info", f"ready: {mi['label']}")
 
-            self.asr = Qwen3ASRModel.from_pretrained(str(asr_path), **kwargs)
-            self.device = device
-            self.dtype = dtype
-            self.aligner_loaded = aligner_path is not None
-            self.loaded_repo = repo_name
-            if on_log:
-                on_log("info", f"ready: {repo_name} on {device}")
+    def _load_sensevoice(self, mi, on_log):
+        if on_log:
+            on_log("info", f"loading {mi['label']} ...")
+        self._backend.load(variant=mi["repo_name"], device="cpu")
+        if on_log:
+            on_log("info", f"ready: {mi['label']}")
 
-    def _unload_locked(self) -> None:
-        if self.asr is None:
-            return
-        try:
-            del self.asr
-        finally:
-            self.asr = None
-            self.aligner_loaded = False
-            torch = _import_torch()
-            try:
-                if self.device and self.device.startswith("mps"):
-                    torch.mps.empty_cache()
-                elif self.device and self.device.startswith("cuda"):
-                    torch.cuda.empty_cache()
-            except Exception:
-                pass
+    def _unload_locked(self):
+        if self._backend is not None:
+            self._backend.unload()
+            self._backend = None
 
-    def unload(self) -> None:
+    def unload(self):
         with self._lock:
             self._unload_locked()
 
     def transcribe_one(self, wav: np.ndarray, language: Optional[str],
-                       return_time_stamps: bool):
-        """Transcribe a single mono 16k float32 segment. Returns the ASR result
-        object (language/text/time_stamps). Inference happens under the lock
-        because the HF model is not reentrant."""
-        if self.asr is None:
-            raise RuntimeError("model not loaded")
+                       return_time_stamps: bool) -> ASRResult:
+        if self._backend is None:
+            raise RuntimeError("no backend loaded")
         lang = None if (language is None or str(language).lower() == "auto") else language
         with self._lock:
-            res = self.asr.transcribe(
-                audio=(wav, 16000),
-                language=lang,
-                return_time_stamps=return_time_stamps,
-            )
-        return res[0]
+            return self._backend.transcribe(wav, lang, return_time_stamps)
 
 
 def _looks_complete(model_dir: Path) -> bool:
-    """A model dir is usable if it has a config and at least one weights file
-    plus the tokenizer files we need for AutoProcessor."""
     if not model_dir.is_dir():
         return False
     if not (model_dir / "config.json").exists():
         return False
     has_weights = any(model_dir.glob("*.safetensors")) or any(model_dir.glob("*.bin"))
     has_tok = (model_dir / "tokenizer.json").exists() or (model_dir / "tokenizer_config.json").exists()
-    # snapshot may include only preprocessor; require weights+tokenizer to load.
     return has_weights and has_tok

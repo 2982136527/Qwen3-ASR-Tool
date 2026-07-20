@@ -14,9 +14,7 @@ from PyQt6.QtWidgets import (QComboBox, QFormLayout, QGroupBox, QHBoxLayout,
                              QLabel, QMessageBox, QProgressBar, QPushButton,
                              QSpinBox, QVBoxLayout, QWidget)
 
-from ..config import (ASR_MODELS, ALIGNER_MODEL, DOWNLOAD_SOURCES, Settings,
-                      save_settings)
-from ..model_manager import ModelManager, available_devices, resolve_device
+from ..config import (DOWNLOAD_SOURCES, Settings, save_settings, MODEL_OPTIONS, model_by_key)
 
 
 class DownloadWorker(QThread):
@@ -82,11 +80,11 @@ class SettingsWidget(QWidget):
         f.setHorizontalSpacing(10); f.setVerticalSpacing(8)
 
         self.cmb_asr = QComboBox()
-        for k, v in ASR_MODELS.items():
-            self.cmb_asr.addItem(f"{k}  ({v})", k)
-        # select currently configured asr_model
+        for m in MODEL_OPTIONS:
+            self.cmb_asr.addItem(m["label"], m["key"])
         idx = max(0, self.cmb_asr.findData(self.settings.asr_model))
         self.cmb_asr.setCurrentIndex(idx)
+        self.cmb_asr.currentIndexChanged.connect(self._on_model_changed)
 
         self.cmb_device = QComboBox()
         self.cmb_device.addItem("自动", "auto")
@@ -165,8 +163,24 @@ class SettingsWidget(QWidget):
         self.btn_download_all.clicked.connect(lambda: self._download(asr_only=True, aligner=True))
         self.btn_load.clicked.connect(self._load)
 
+
+    def _on_model_changed(self, idx):
+        mi = MODEL_OPTIONS[idx]
+        is_qwen = mi["backend"] == "qwen"
+        self.btn_download.setVisible(is_qwen)
+        self.btn_download_aligner.setVisible(is_qwen)
+        self.btn_download_all.setVisible(is_qwen)
+        self.cmb_prec.setVisible(is_qwen)
+        self.cmb_device.setVisible(is_qwen)
+        if not is_qwen:
+            self.cmb_align.setChecked(True)
+            self.cmb_align.setEnabled(False)
+        else:
+            self.cmb_align.setEnabled(True)
+            self.cmb_align.setChecked(self.settings.enable_aligner)
+        self._commit()
     def _commit(self):
-        self.settings.asr_model = self.cmb_asr.currentData()
+        self.settings.asr_model = self.cmb_asr.currentData()  # model key
         self.settings.device = self.cmb_device.currentData()
         self.settings.precision = self.cmb_prec.currentData()
         self.settings.max_new_tokens = int(self.sp_tokens.value())
@@ -177,8 +191,8 @@ class SettingsWidget(QWidget):
 
     def refresh_status(self):
         try:
-            asr_name = ASR_MODELS.get(self.settings.asr_model, "")
-            al = ALIGNER_MODEL
+            asr_name = self.settings.model_info()["repo_name"]
+            al = self.settings.model_info().get("aligner", "Qwen3-ForcedAligner-0.6B")
             asr_st = self.model_manager.model_status(asr_name) if asr_name else "missing"
             al_st = self.model_manager.model_status(al)
             d = self.model_manager.model_dir(asr_name)
@@ -210,10 +224,10 @@ class SettingsWidget(QWidget):
         self._commit()
         tasks = []
         if asr_only:
-            name = ASR_MODELS[self.settings.asr_model]
+            name = self.settings.model_info()["repo_name"]
             tasks.append((f"Qwen/{name}", name))
         if aligner:
-            tasks.append((f"Qwen/{ALIGNER_MODEL}", ALIGNER_MODEL))
+            alr = self.settings.model_info().get("aligner_repo"); tasks.append((alr, self.settings.model_info()["aligner"])) if alr else None
         if not tasks:
             return
         self.progress.setRange(0, 0)

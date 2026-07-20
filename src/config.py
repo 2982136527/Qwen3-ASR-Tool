@@ -11,18 +11,57 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict
 
-ASR_MODELS = {
-    "1.7B": "Qwen3-ASR-1.7B",
-    "0.6B": "Qwen3-ASR-0.6B",
-}
-ALIGNER_MODEL = "Qwen3-ForcedAligner-0.6B"
+MODEL_OPTIONS = [
+    {
+        "key": "qwen-1.7b",
+        "label": "Qwen3-ASR 1.7B (高精度)",
+        "backend": "qwen",
+        "repo_name": "Qwen3-ASR-1.7B",
+        "aligner": "Qwen3-ForcedAligner-0.6B",
+        "aligner_repo": "Qwen/Qwen3-ForcedAligner-0.6B",
+        "needs_download": True,
+    },
+    {
+        "key": "qwen-0.6b",
+        "label": "Qwen3-ASR 0.6B (轻量版)",
+        "backend": "qwen",
+        "repo_name": "Qwen3-ASR-0.6B",
+        "aligner": "Qwen3-ForcedAligner-0.6B",
+        "aligner_repo": "Qwen/Qwen3-ForcedAligner-0.6B",
+        "needs_download": True,
+    },
+    {
+        "key": "whisper-large-v3",
+        "label": "Whisper large-v3 (faster-whisper)",
+        "backend": "whisper",
+        "repo_name": "large-v3",
+        "aligner": "内置词级时间戳",
+        "aligner_repo": None,
+        "needs_download": False,  # auto-download on first load
+    },
+    {
+        "key": "sensevoice-small",
+        "label": "SenseVoice-Small (多语言+情感)",
+        "backend": "sensevoice",
+        "repo_name": "small",
+        "aligner": "内置 VAD 时间戳",
+        "aligner_repo": None,
+        "needs_download": False,
+    },
+]
+
+def model_by_key(key: str) -> dict:
+    for m in MODEL_OPTIONS:
+        if m["key"] == key:
+            return m
+    return MODEL_OPTIONS[0]
 
 DOWNLOAD_SOURCES = ["modelscope", "huggingface", "auto"]
 
 
 @dataclass
 class Settings:
-    asr_model: str = "1.7B"          # key into ASR_MODELS
+    asr_model: str = "qwen-1.7b"      # key into MODEL_OPTIONS
     device: str = "auto"              # auto | mps | cuda | cpu
     precision: str = "auto"           # auto | float16 | bfloat16 | float32
     language: str = "auto"            # auto | Chinese | English | ...
@@ -46,8 +85,8 @@ class Settings:
     # window
     theme: str = "dark"
 
-    def model_repo(self) -> str:
-        return ASR_MODELS[self.asr_model]
+    def model_info(self) -> dict:
+        return model_by_key(self.asr_model)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
