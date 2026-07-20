@@ -1,9 +1,4 @@
-"""Load and manage ASR models via pluggable backends.
-
-Switches between Qwen3-ASR, Whisper large-v3 (faster-whisper), and SenseVoice
-at runtime.  Each backend conforms to the ASRBackend protocol so the rest of
-the application never needs to know which engine is loaded.
-"""
+"""Load and manage ASR models via pluggable backends."""
 from __future__ import annotations
 
 import threading
@@ -55,37 +50,29 @@ def resolve_dtype(settings_precision: str, device: str):
         if device == "mps":
             return torch.float16
         return torch.float32
-    return {
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
-        "float32": torch.float32,
-    }[settings_precision]
+    return {"float16": torch.float16, "bfloat16": torch.bfloat16, "float32": torch.float32}[settings_precision]
 
 
 class ModelManager:
-    """Holds one ASR backend at a time, routes transcribe calls through it."""
-
     def __init__(self, settings: Settings):
         self.settings = settings
         self._lock = threading.Lock()
         self._backend = None
 
     @property
-    def is_loaded(self) -> bool:
+    def is_loaded(self):
         return self._backend is not None and self._backend.is_loaded
 
     @property
-    def aligner_loaded(self) -> bool:
-        if self._backend is not None:
-            return getattr(self._backend, "aligner_loaded", False)
-        return False
+    def aligner_loaded(self):
+        return getattr(self._backend, "aligner_loaded", False) if self._backend else False
 
     @property
-    def device(self) -> str:
+    def device(self):
         return self._backend.device_name if self._backend else ""
 
     @property
-    def loaded_repo(self) -> str:
+    def loaded_repo(self):
         return self._backend.model_id if self._backend else ""
 
     def models_root(self) -> Path:
@@ -106,66 +93,59 @@ class ModelManager:
             return "partial"
         return "missing"
 
-    def ensure_downloaded(self, repo_id: str, repo_name: str, on_log=None) -> Path:
+    def ensure_downloaded(self, repo_id, repo_name, on_log=None):
         target = self.model_dir(repo_name)
         target.mkdir(parents=True, exist_ok=True)
         if (target / ".downloaded").exists() and _looks_complete(target):
             return target
         from scripts.fetch import download_one
-        source = self.settings.download_source
         if on_log:
-            on_log("info", f"downloading {repo_id} via {source} -> {target}")
-        download_one(repo_id, target, source)
+            on_log("info", f"downloading {repo_id} -> {target}")
+        download_one(repo_id, target, self.settings.download_source)
         return target
 
-    def load(self, on_log=None, on_stage=None) -> None:
+    def load(self, on_log=None, on_stage=None):
         mi = self.settings.model_info()
-        backend_type = mi["backend"]
-
+        bt = mi["backend"]
         with self._lock:
             self._unload_locked()
-
-            if backend_type == "qwen":
+            if bt == "qwen":
                 self._backend = QwenBackend(str(self.models_root()))
                 self._load_qwen(mi, on_log, on_stage)
-            elif backend_type == "whisper":
+            elif bt == "whisper":
                 self._backend = WhisperBackend(str(self.models_root()))
                 self._load_whisper(mi, on_log)
-            elif backend_type == "sensevoice":
+            elif bt == "sensevoice":
                 self._backend = SenseVoiceBackend(str(self.models_root()))
                 self._load_sensevoice(mi, on_log)
-            elif backend_type == "pipeline":
+            elif bt == "pipeline":
                 self._backend = PipelineBackend(str(self.models_root()))
                 self._load_pipeline(mi, on_log, on_stage)
             else:
-                raise ValueError(f"Unknown backend: {backend_type}")
+                raise ValueError(f"Unknown backend: {bt}")
 
     def _load_qwen(self, mi, on_log, on_stage):
         device = resolve_device(self.settings.device)
         dtype = resolve_dtype(self.settings.precision, device)
-
         repo_id = f"Qwen/{mi['repo_name']}"
         if on_stage:
             on_stage(f"checking {mi['repo_name']}")
         self.ensure_downloaded(repo_id, mi["repo_name"], on_log)
         asr_path = self.model_dir(mi["repo_name"])
-
         aligner_path = None
         if self.settings.enable_aligner and mi.get("aligner_repo"):
             if on_stage:
                 on_stage(f"checking {mi['aligner']}")
             self.ensure_downloaded(mi["aligner_repo"], mi["aligner"], on_log)
             aligner_path = self.model_dir(mi["aligner"])
-
         if on_log:
             on_log("info", f"loading {mi['label']} on {device} ({dtype})")
         if on_stage:
-            on_stage("loading model")
+            on_stage("loading")
         self._backend.load(
             asr_path=str(asr_path),
             aligner_path=str(aligner_path) if aligner_path else None,
-            device=device,
-            dtype=dtype,
+            device=device, dtype=dtype,
             max_inference_batch_size=self.settings.max_inference_batch_size,
             max_new_tokens=self.settings.max_new_tokens,
         )
@@ -187,6 +167,28 @@ class ModelManager:
         if on_log:
             on_log("info", f"ready: {mi['label']}")
 
+    def _load_pipeline(self, mi, on_log, on_stage):
+        device = resolve_device(self.settings.device)
+        dtype = resolve_dtype(self.settings.precision, device)
+        aligner_path = None
+        if mi.get("aligner_repo"):
+            if on_stage:
+                on_stage(f"checking {mi['aligner']}")
+            self.ensure_downloaded(mi["aligner_repo"], mi["aligner"], on_log)
+            aligner_path = str(self.model_dir(mi["aligner"]))
+        if on_log:
+            on_log("info", f"loading pipeline on {device}")
+        if on_stage:
+            on_stage("loading Whisper+Aligner+SenseVoice...")
+        self._backend.load(
+            whisper_size=mi.get("repo_name", "large-v3"),
+            sensevoice_variant="small",
+            aligner_path=aligner_path,
+            device=device, dtype=dtype,
+        )
+        if on_log:
+            on_log("info", "pipeline ready")
+
     def _unload_locked(self):
         if self._backend is not None:
             self._backend.unload()
@@ -194,13 +196,9 @@ class ModelManager:
 
     def unload(self):
         with self._lock:
-            if self._backend is not None:
-                self._backend.unload()
-                self._backend = None
             self._unload_locked()
 
-    def transcribe_one(self, wav: np.ndarray, language: Optional[str],
-                       return_time_stamps: bool) -> ASRResult:
+    def transcribe_one(self, wav, language, return_time_stamps) -> ASRResult:
         if self._backend is None:
             raise RuntimeError("no backend loaded")
         lang = None if (language is None or str(language).lower() == "auto") else language
@@ -216,26 +214,3 @@ def _looks_complete(model_dir: Path) -> bool:
     has_weights = any(model_dir.glob("*.safetensors")) or any(model_dir.glob("*.bin"))
     has_tok = (model_dir / "tokenizer.json").exists() or (model_dir / "tokenizer_config.json").exists()
     return has_weights and has_tok
-    def _load_pipeline(self, mi, on_log, on_stage):
-        device = resolve_device(self.settings.device)
-        dtype = resolve_dtype(self.settings.precision, device)
-        # Ensure aligner is downloaded
-        aligner_path = None
-        if mi.get("aligner_repo"):
-            if on_stage:
-                on_stage(f"checking {mi['aligner']}")
-            self.ensure_downloaded(mi["aligner_repo"], mi["aligner"], on_log)
-            aligner_path = str(self.model_dir(mi["aligner"]))
-        if on_log:
-            on_log("info", f"loading pipeline: Whisper+QwenAligner+SenseVoice on {device}")
-        if on_stage:
-            on_stage("loading Whisper...")
-        self._backend.load(
-            whisper_size=mi.get("repo_name", "large-v3"),
-            sensevoice_variant="small",
-            aligner_path=aligner_path,
-            device=device,
-            dtype=dtype,
-        )
-        if on_log:
-            on_log("info", f"pipeline ready")

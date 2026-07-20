@@ -45,17 +45,18 @@ class WhisperBackend:
         from faster_whisper import WhisperModel
 
         self.unload()
+        # faster-whisper doesn't accept "mps"; map to "auto" before compute_type
+        if device in ("mps", "auto"):
+            device = "auto"
         if compute_type == "auto":
             if device.startswith("cuda"):
-                compute_type = "float16"
-            elif device == "mps":
                 compute_type = "int8_float16"
             else:
                 compute_type = "int8"
         # faster-whisper auto-downloads model to HF cache on first use
         self._model = WhisperModel(
             model_size,
-            device="auto" if device in ("auto", "mps") else device,
+            device=device,
             compute_type=compute_type,
             download_root=self._models_root or None,
             local_files_only=False,
